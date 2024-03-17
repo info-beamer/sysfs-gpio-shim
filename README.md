@@ -50,6 +50,9 @@ exporting/unexporting the GPIO works too.
 The behaviour should be mostly identical to what the
 sysfs implementation did. See also TODO.md.
 
+Non-Pi devices are not supported and no effort will
+be made by me to change this. Sorry.
+
 ## Performance
 
 Probably garbage. If you're using sysfs-based GPIO

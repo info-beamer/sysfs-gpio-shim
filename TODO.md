@@ -1,5 +1,8 @@
  * Stop epoll'ing edges if no one is polling on /value.
 
+ * Examine what the default state of lines is. This tool
+   always sets the line direction to input after 'export'.
+
  * Make sure reading and writing from the individual gpio files is the same
    as the original sysfs interface:
 
