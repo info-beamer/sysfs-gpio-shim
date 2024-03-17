@@ -284,7 +284,9 @@ static int pin_setup(pin_t *pin) {
 static void pin_release(pin_t *pin) {
     pthread_mutex_lock(&pin->lock);
     assert(pin->in_use);
-    gpiod_line_request_release(pin->gpio_line_request); // also closes fd?
+    if (pin->edge != GPIOD_LINE_EDGE_NONE)
+        edge_detect_remove_pin(pin);
+    gpiod_line_request_release(pin->gpio_line_request);
     pin->in_use = 0;
     pin_edge_wait_t *waiter, *tmp;
     HASH_ITER(hh, pin->edge_waiters, waiter, tmp) {
