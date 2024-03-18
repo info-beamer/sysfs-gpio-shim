@@ -28,9 +28,6 @@
 
 #include "uthash.h"
 
-// How many lines we expect the GPIO chip to expose.
-#define NUM_PINS 54
-
 #define v(...) do { fprintf(stderr, __VA_ARGS__); } while (0)
 
 void die(const char *fmt, ...) {
@@ -87,50 +84,54 @@ static void edge_detect_setup();
 
 /////////////////////////////////////////////////////////////////////
 
-static struct gpiod_chip *gpio_chip = NULL;
+static struct gpiod_chip **chips = NULL;
+static int num_chips = 0;
 
-static struct gpiod_chip *detect_chip() {
-    DIR *dev_dir = opendir("/dev/");
-    if (!dev_dir)
-        return NULL;
+static int chip_dir_filter(const struct dirent *entry) {
+    char path[NAME_MAX + 6];
+    snprintf(path, sizeof(path), "/dev/%s", entry->d_name);
+    struct stat sb;
+    return lstat(path, &sb) == 0 &&
+        !S_ISLNK(sb.st_mode) &&
+        gpiod_is_gpiochip_device(path);
+}
 
-    struct dirent *f;
-    struct gpiod_chip *chip = NULL;
-    while ((f = readdir(dev_dir)) != NULL) {
+static int get_chips(struct gpiod_chip ***chips_ptr) {
+    int i, num_chips;
+    struct dirent **entries;
+    struct gpiod_chip **chips;
+    num_chips = scandir("/dev/", &entries, chip_dir_filter, versionsort);
+    if (num_chips < 0)
+        return 0;
+    chips = xmalloc(num_chips * sizeof(*chips));
+    for (i = 0; i < num_chips; i++) {
         char path[NAME_MAX + 6];
-        snprintf(path, sizeof(path), "/dev/%s", f->d_name);
-        struct stat sb;
-        if (lstat(path, &sb) != 0 || S_ISLNK(sb.st_mode))
-            continue;
-        if (!gpiod_is_gpiochip_device(path))
-            continue;
-        chip = gpiod_chip_open(path);
-        if (!chip)
+        snprintf(path, sizeof(path), "/dev/%s", entries[i]->d_name);
+        chips[i] = gpiod_chip_open(path);
+    }
+    *chips_ptr = chips;
+    for (i = 0; i < num_chips; i++)
+        free(entries[i]);
+    free(entries);
+    return num_chips;
+}
+
+static int find_gpio_by_name(
+    const char *name, struct gpiod_chip **found_chip, unsigned int *found_offset
+) {
+    for (int i = 0; i < num_chips; i++) {
+        struct gpiod_chip *chip = chips[i];
+        int offset = gpiod_chip_get_line_offset_from_name(chip, name);
+        if (offset == -1)
             continue;
         struct gpiod_chip_info *info = gpiod_chip_get_info(chip);
-        if (!info) {
-            gpiod_chip_close(chip);
-            chip = NULL;
-            continue;
-        }
-        const char *label = gpiod_chip_info_get_label(info);
-        // http://git.munts.com/muntsos/doc/AppNote11-link-gpiochip.pdf
-        if (!str_equal(label, "pinctrl-bcm2835") && // Pi 1 to 3
-            !str_equal(label, "pinctrl-bcm2711") && // Pi 4
-            !str_equal(label, "pinctrl-rp1")        // Pi 5
-        ) {
-            gpiod_chip_close(chip);
-            chip = NULL;
-            continue;
-        }
-        if (gpiod_chip_info_get_num_lines(info) != NUM_PINS)
-            die("unexpected number of lines. change NUM_PINS and recompile");
-        // v("Using chip %s (%s)\n", path, gpiod_chip_info_get_label(info));
+        v("%s: %s @ %d\n", name, gpiod_chip_info_get_name(info), offset);
+        *found_chip = chip;
+        *found_offset = offset;
         gpiod_chip_info_free(info);
-        break;
+        return 1;
     }
-    closedir(dev_dir);
-    return chip;
+    return 0;
 }
 
 /////////////////////////////////////////////////////////////////////
@@ -143,16 +144,19 @@ typedef struct {
 } pin_edge_wait_t;
 
 struct pin_s {
-    unsigned int n;
+    int n;
     int in_use;
     enum gpiod_line_direction direction;
     enum gpiod_line_edge edge;
     int active_low;
     pthread_mutex_t lock;
+    struct gpiod_chip *gpio_chip;
     struct gpiod_line_request *gpio_line_request;
+    unsigned int gpio_line_offset;
     pin_edge_wait_t *edge_waiters;
 };
 
+#define NUM_PINS 54
 static pin_t pins[NUM_PINS] = {0};
 
 typedef struct {
@@ -238,7 +242,7 @@ static int pin_reconfigure_line(pin_t *pin) {
         die("cannot alloc line config");
 
     if (gpiod_line_config_add_line_settings(
-        line_cfg, &pin->n, 1, settings
+        line_cfg, &pin->gpio_line_offset, 1, settings
     ))
         die("cannot add settings");
 
@@ -248,7 +252,7 @@ static int pin_reconfigure_line(pin_t *pin) {
             die("cannot alloc request config");
         gpiod_request_config_set_consumer(req_cfg, "sysfs-gpio-shim");
         pin->gpio_line_request = gpiod_chip_request_lines(
-            gpio_chip, req_cfg, line_cfg
+            pin->gpio_chip, req_cfg, line_cfg
         );
         gpiod_request_config_free(req_cfg);
     } else {
@@ -265,6 +269,13 @@ static int pin_reconfigure_line(pin_t *pin) {
 static int pin_setup(pin_t *pin) {
     pthread_mutex_lock(&pin->lock);
     assert(!pin->in_use);
+
+    char name[20];
+    snprintf(name, sizeof(name), "GPIO%d", pin->n);
+    if (!find_gpio_by_name(name, &pin->gpio_chip, &pin->gpio_line_offset)) {
+        pthread_mutex_unlock(&pin->lock);
+        return 0;
+    }
 
     pin->direction = GPIOD_LINE_DIRECTION_INPUT;
     pin->edge = GPIOD_LINE_EDGE_NONE;
@@ -316,7 +327,7 @@ static void pin_set_dir_out(pin_t *pin, int initial_value) {
         pin->direction = GPIOD_LINE_DIRECTION_OUTPUT;
         pin_reconfigure_line(pin);
         gpiod_line_request_set_value(
-            pin->gpio_line_request, pin->n, initial_value
+            pin->gpio_line_request, pin->gpio_line_offset, initial_value
         );
     }
     pthread_mutex_unlock(&pin->lock);
@@ -350,7 +361,7 @@ static void pin_set_value(pin_t *pin, int value) {
     pthread_mutex_lock(&pin->lock);
     assert(pin->in_use);
     gpiod_line_request_set_value(
-        pin->gpio_line_request, pin->n, value
+        pin->gpio_line_request, pin->gpio_line_offset, value
     );
     pthread_mutex_unlock(&pin->lock);
 }
@@ -359,7 +370,7 @@ static int pin_get_value(pin_t *pin) {
     pthread_mutex_lock(&pin->lock);
     assert(pin->in_use);
     int value = gpiod_line_request_get_value(
-        pin->gpio_line_request, pin->n
+        pin->gpio_line_request, pin->gpio_line_offset
     );
     pthread_mutex_unlock(&pin->lock);
     return value;
@@ -681,6 +692,11 @@ static void *gpio_init(
     struct fuse_conn_info *conn,
     struct fuse_config *cfg
 ) {
+    for (int p = 0; p < NUM_PINS; p++) {
+        pins[p].n = p;
+        pthread_mutex_init(&pins[p].lock, NULL);
+    }
+    num_chips = get_chips(&chips);
     edge_detect_setup();
     return NULL;
 }
@@ -775,12 +791,5 @@ static void edge_detect_setup() {
 }
 
 int main(int argc, char **argv) {
-    gpio_chip = detect_chip();
-    if (!gpio_chip)
-        die("cannot detect GPIO chip to use");
-    for (int p = 0; p < NUM_PINS; p++) {
-        pins[p].n = p;
-        pthread_mutex_init(&pins[p].lock, NULL);
-    }
     return fuse_main(argc, argv, &gpio_oper, NULL);
 }
