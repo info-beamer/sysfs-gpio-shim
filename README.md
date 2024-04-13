@@ -1,7 +1,7 @@
 #  Reviving /sys/class/gpio using FUSE
 
 This FUSE based virtual filesystem emulates the deprecated
-/sys/class/gpio method of manipulating GPIOs. I wrote this
+[/sys/class/gpio method](https://github.com/torvalds/linux/blob/7efd0a74039fb6b584be2cb91c1d0ef0bd796ee1/Documentation/userspace-api/gpio/sysfs.rst) of manipulating GPIOs. I wrote this
 tool to see if it is possible to maintain backwards
 compatibility for code deployed on a number of Raspberry Pis.
 
