@@ -63,3 +63,7 @@ control and expect performance, you're doing it wrong.
 If you find a bug, feel free to open an issue. If you
 use this tool and it works well, please also let me
 know :)
+
+## Similar projects
+
+* [gpiod-sysfs-proxy](https://github.com/brgl/gpiod-sysfs-proxy), written in Python.
